@@ -1,6 +1,6 @@
   <!-- HEADER -->
   <header>
-    <h1>YT Curved</h1>
+    <h1>Youtube-theater-curved</h1>
     <p class="tagline">
       Add 20px rounded corners, blended black bars, and a customizable control bar
       to YouTube's theater mode and fullscreen. Now with screenshot, loop, and

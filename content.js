@@ -1,15 +1,12 @@
-﻿(function() {
+(function() {
   'use strict';
 
   if (!window.location.pathname.startsWith('/watch')) return;
 
   // ============================================================
-  // SETTINGS (persisted via chrome.storage.sync)
+  // SETTINGS
   // ============================================================
-  const DEFAULT_SETTINGS = {
-    radius: 20,
-    rememberTheater: false
-  };
+  const DEFAULT_SETTINGS = { radius: 20, rememberTheater: false };
   let settings = { ...DEFAULT_SETTINGS };
 
   function loadSettings() {
@@ -33,24 +30,19 @@
   }
 
   function applyRadius() {
-    document.documentElement.style.setProperty(
-      '--yt-curved-radius',
-      settings.radius + 'px'
-    );
+    document.documentElement.style.setProperty('--yt-curved-radius', settings.radius + 'px');
   }
 
   // ============================================================
   // STATE
   // ============================================================
-  let isTheaterActive = false;
-  let isFullscreenActive = false;
   let theaterButtonObserver = null;
   let watchFlexyObserver = null;
   let bodyObserver = null;
   let domObserver = null;
-  let isInitialized = false;
   let barInjected = false;
   let isLooping = false;
+  let retryTimer = null;
 
   // ============================================================
   // DEBOUNCE
@@ -65,16 +57,34 @@
   const debouncedUpdate = debounce(updateAllStates, 100);
 
   // ============================================================
+  // THEATER BUTTON — flexible selector
+  // ============================================================
+  function getTheaterButton() {
+    // YouTube's theater button has class .ytp-size-button on the player
+    // but it also has an aria-label like "Theater mode" / "Default view"
+    // Use multiple selectors to be safe.
+    return (
+      document.querySelector('.ytp-size-button[aria-label]') ||
+      document.querySelector('button[aria-label="Theater mode"]') ||
+      document.querySelector('button[aria-label*="Theater" i]') ||
+      document.querySelector('button[data-tooltip-target-id="ytp-size-button"]')
+    );
+  }
+
+  // ============================================================
   // DETECTION
   // ============================================================
   function checkTheaterMode() {
-    const theaterBtn = document.querySelector('[aria-label="Theater mode"]');
-    if (theaterBtn && theaterBtn.getAttribute('aria-pressed') === 'true') return true;
-
+    // 1. Prefer the watch-flexy attribute — it's the source of truth
     const watchFlexy = document.querySelector('ytd-watch-flexy');
     if (watchFlexy && watchFlexy.hasAttribute('theater')) return true;
 
+    // 2. Body class (older layouts)
     if (document.body.classList.contains('theater')) return true;
+
+    // 3. Player element class
+    const player = document.querySelector('#movie_player');
+    if (player && player.classList.contains('ytp-fullscreen')) return false; // fullscreen isn't theater
 
     return false;
   }
@@ -92,14 +102,11 @@
   function updateTheaterState() {
     const html = document.documentElement;
     const isActive = checkTheaterMode();
-
     if (isActive && !html.classList.contains('yt-theater-curved')) {
       html.classList.add('yt-theater-curved');
-      isTheaterActive = true;
       console.log('[YT Curved] ✅ Theater mode ON');
     } else if (!isActive && html.classList.contains('yt-theater-curved')) {
       html.classList.remove('yt-theater-curved');
-      isTheaterActive = false;
       console.log('[YT Curved] ❌ Theater mode OFF');
     }
   }
@@ -107,14 +114,11 @@
   function updateFullscreenState() {
     const html = document.documentElement;
     const isActive = checkFullscreenMode();
-
     if (isActive && !html.classList.contains('yt-fullscreen-curved')) {
       html.classList.add('yt-fullscreen-curved');
-      isFullscreenActive = true;
       console.log('[YT Curved] ✅ Fullscreen ON');
     } else if (!isActive && html.classList.contains('yt-fullscreen-curved')) {
       html.classList.remove('yt-fullscreen-curved');
-      isFullscreenActive = false;
       console.log('[YT Curved] ❌ Fullscreen OFF');
     }
   }
@@ -125,24 +129,22 @@
   }
 
   // ============================================================
-  // CUSTOM CONTROL BAR
+  // SVG ICONS
   // ============================================================
   const SVG_LOOP = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>';
   const SVG_CAMERA = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/></svg>';
   const SVG_THEATER = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z"/></svg>';
   const SVG_SETTINGS = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>';
 
-     function findInsertionPoint() {
-    // We want the OUTER player wrapper (sibling of #below),
-    // not any nested player container.
-    // Structure: #primary-inner > #player ... #below
+  // ============================================================
+  // CONTROL BAR
+  // ============================================================
+  function findInsertionPoint() {
     const primaryInner = document.querySelector('ytd-watch-flexy #primary-inner');
     if (primaryInner) {
       const outerPlayer = primaryInner.querySelector('#player');
       if (outerPlayer) return outerPlayer;
     }
-
-    // Fallback chain (last resort)
     return (
       document.querySelector('#player') ||
       document.querySelector('ytd-player') ||
@@ -160,7 +162,6 @@
     const bar = document.createElement('div');
     bar.id = 'yt-curved-bar';
 
-    // --- Loop button ---
     const btnLoop = document.createElement('button');
     btnLoop.className = 'yt-curved-btn';
     btnLoop.dataset.action = 'loop';
@@ -168,7 +169,6 @@
     btnLoop.innerHTML = SVG_LOOP;
     btnLoop.addEventListener('click', toggleLoop);
 
-    // --- Screenshot button ---
     const btnShot = document.createElement('button');
     btnShot.className = 'yt-curved-btn';
     btnShot.dataset.action = 'screenshot';
@@ -176,7 +176,6 @@
     btnShot.innerHTML = SVG_CAMERA;
     btnShot.addEventListener('click', takeScreenshot);
 
-    // --- Theater-remember button ---
     const btnTheater = document.createElement('button');
     btnTheater.className = 'yt-curved-btn';
     btnTheater.dataset.action = 'theater';
@@ -185,7 +184,6 @@
     if (settings.rememberTheater) btnTheater.classList.add('active');
     btnTheater.addEventListener('click', toggleRememberTheater);
 
-    // --- Settings button ---
     const btnSettings = document.createElement('button');
     btnSettings.className = 'yt-curved-btn';
     btnSettings.dataset.action = 'settings';
@@ -193,7 +191,6 @@
     btnSettings.innerHTML = SVG_SETTINGS;
     btnSettings.addEventListener('click', toggleSettingsPopup);
 
-    // --- Settings popup ---
     const popup = document.createElement('div');
     popup.className = 'yt-curved-settings-popup';
     popup.id = 'yt-curved-settings-popup';
@@ -234,25 +231,21 @@
     bar.appendChild(btnSettings);
     bar.appendChild(popup);
 
-    // Insert the bar as a SIBLING right after #player (so it sits
-    // in the page flow, between the player and #below — outside the player).
     anchor.insertAdjacentElement('afterend', bar);
     barInjected = true;
-    console.log('[YT Curved] Control bar injected after #player');
+    console.log('[YT Curved] Control bar injected');
     return true;
   }
 
   function ensureBarInjected() {
-    if (!barInjected || !document.getElementById('yt-curved-bar')) {
-      // Try a few times with increasing delay
-      let tries = 0;
-      const attempt = () => {
-        tries++;
-        if (injectControlBar() || tries > 10) return;
-        setTimeout(attempt, 300);
-      };
-      attempt();
-    }
+    if (barInjected && document.getElementById('yt-curved-bar')) return;
+    let tries = 0;
+    const attempt = () => {
+      tries++;
+      if (injectControlBar() || tries > 10) return;
+      setTimeout(attempt, 300);
+    };
+    attempt();
   }
 
   // ============================================================
@@ -263,29 +256,21 @@
     if (!video) return;
     isLooping = !isLooping;
     video.loop = isLooping;
-    const btn = e.currentTarget;
-    btn.classList.toggle('active', isLooping);
+    e.currentTarget.classList.toggle('active', isLooping);
     showToast(isLooping ? 'Loop ON' : 'Loop OFF');
   }
 
   function takeScreenshot() {
     const video = document.querySelector('video.html5-main-video') || document.querySelector('video');
-    if (!video || !video.videoWidth) {
-      showToast('Screenshot failed');
-      return;
-    }
+    if (!video || !video.videoWidth) { showToast('Screenshot failed'); return; }
     try {
       const canvas = document.createElement('canvas');
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
       canvas.toBlob((blob) => {
-        if (!blob) {
-          showToast('Screenshot failed');
-          return;
-        }
+        if (!blob) { showToast('Screenshot failed'); return; }
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         const videoId = new URLSearchParams(window.location.search).get('v') || 'video';
@@ -299,7 +284,7 @@
       }, 'image/png');
     } catch (err) {
       console.warn('[YT Curved] Screenshot error:', err);
-      showToast('Screenshot blocked by YouTube');
+      showToast('Screenshot blocked');
     }
   }
 
@@ -308,9 +293,7 @@
     saveSetting('rememberTheater', newVal);
     e.currentTarget.classList.toggle('active', newVal);
     showToast(newVal ? 'Will auto-enter theater mode' : 'Auto theater mode OFF');
-    if (newVal) {
-      enterTheaterMode();
-    }
+    if (newVal) enterTheaterMode();
   }
 
   function toggleSettingsPopup(e) {
@@ -322,11 +305,8 @@
 
   function enterTheaterMode() {
     if (checkTheaterMode()) return;
-    const btn = document.querySelector('[aria-label="Theater mode"]');
-    if (btn) {
-      btn.click();
-      console.log('[YT Curved] Auto-entered theater mode');
-    }
+    const btn = getTheaterButton();
+    if (btn) { btn.click(); console.log('[YT Curved] Auto-entered theater mode'); }
   }
 
   // ============================================================
@@ -357,33 +337,38 @@
     if (domObserver)            { domObserver.disconnect();            domObserver = null; }
   }
 
+  function attachTheaterButtonObserver() {
+    if (theaterButtonObserver) return;
+    const btn = getTheaterButton();
+    if (!btn) return;
+    theaterButtonObserver = new MutationObserver(() => debouncedUpdate());
+    theaterButtonObserver.observe(btn, { attributes: true, attributeFilter: ['aria-pressed', 'aria-label'] });
+    console.log('[YT Curved] Theater button observer attached');
+  }
+
   function setupObservers() {
     cleanupAllObservers();
 
-    const theaterBtn = document.querySelector('[aria-label="Theater mode"]');
-    if (theaterBtn) {
-      theaterButtonObserver = new MutationObserver(() => debouncedUpdate());
-      theaterButtonObserver.observe(theaterBtn, { attributes: true, attributeFilter: ['aria-pressed'] });
-    }
+    // 1. Theater button (may appear later, retry in domObserver)
+    attachTheaterButtonObserver();
 
+    // 2. watch-flexy [theater] attribute
     const watchFlexy = document.querySelector('ytd-watch-flexy');
     if (watchFlexy) {
       watchFlexyObserver = new MutationObserver(() => debouncedUpdate());
       watchFlexyObserver.observe(watchFlexy, { attributes: true, attributeFilter: ['theater'] });
+      console.log('[YT Curved] watch-flexy observer attached');
     }
 
+    // 3. body class
     bodyObserver = new MutationObserver(() => {
       if (document.body.classList.contains('theater')) debouncedUpdate();
     });
     bodyObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
+    // 4. Catch late-arriving theater button + fullscreen class on player + inject bar
     domObserver = new MutationObserver(() => {
-      const btn = document.querySelector('[aria-label="Theater mode"]');
-      if (btn && !theaterButtonObserver) {
-        theaterButtonObserver = new MutationObserver(() => debouncedUpdate());
-        theaterButtonObserver.observe(btn, { attributes: true, attributeFilter: ['aria-pressed'] });
-        debouncedUpdate();
-      }
+      attachTheaterButtonObserver();
 
       const player = document.querySelector('#movie_player');
       if (player && !player._ytCurvedFsObserver) {
@@ -392,7 +377,6 @@
         player._ytCurvedFsObserver = fsObserver;
       }
 
-      // Re-inject bar if it's gone (YouTube may wipe it on some transitions)
       if (!document.getElementById('yt-curved-bar')) {
         barInjected = false;
         ensureBarInjected();
@@ -400,43 +384,71 @@
     });
     domObserver.observe(document.body, { childList: true, subtree: true });
 
-    // Initial inject
+    // Initial inject + state check
     ensureBarInjected();
-
-    // Remember theater mode
-    if (settings.rememberTheater) {
-      setTimeout(enterTheaterMode, 800);
-    }
-
-    debouncedUpdate();
-    isInitialized = true;
+    updateAllStates();
+    console.log('[YT Curved] Observers set up');
   }
 
   // ============================================================
-  // NAVIGATION
+  // INIT / NAVIGATION
   // ============================================================
+  function waitForWatchFlexyAndSetup(attempt) {
+    attempt = attempt || 0;
+    const watchFlexy = document.querySelector('ytd-watch-flexy');
+
+    if (watchFlexy) {
+      setupObservers();
+      return;
+    }
+
+    if (attempt > 40) {
+      console.log('[YT Curved] ytd-watch-flexy never appeared, giving up');
+      // Set up anyway — observers on body will still work partially
+      setupObservers();
+      return;
+    }
+
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => waitForWatchFlexyAndSetup(attempt + 1), 250);
+  }
+
   function reinitialize() {
-    console.log('[YT Curved] Navigation – re-initializing...');
+    console.log('[YT Curved] Re-initializing...');
     cleanupAllObservers();
-    isInitialized = false;
     barInjected = false;
     isLooping = false;
-    // Reset loop button visual (video element is new)
-    setTimeout(() => {
-      setupObservers();
-      console.log('[YT Curved] Re-init done');
-    }, 500);
+    clearTimeout(retryTimer);
+    waitForWatchFlexyAndSetup(0);
   }
 
   document.addEventListener('yt-navigate-finish', reinitialize);
   document.addEventListener('fullscreenchange', () => debouncedUpdate());
   document.addEventListener('webkitfullscreenchange', () => debouncedUpdate());
 
+  // Return from background tab / bfcache / window focus
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      console.log('[YT Curved] Tab visible');
+      if (!watchFlexyObserver) waitForWatchFlexyAndSetup(0);
+      else debouncedUpdate();
+    }
+  });
+  window.addEventListener('pageshow', () => {
+    if (!watchFlexyObserver) waitForWatchFlexyAndSetup(0);
+    else debouncedUpdate();
+  });
+  window.addEventListener('focus', () => {
+    if (!watchFlexyObserver) waitForWatchFlexyAndSetup(0);
+    else debouncedUpdate();
+  });
+
+  // Click / keyboard
   document.addEventListener('click', (e) => {
-    if (e.target.closest('[aria-label="Theater mode"]')) {
+    if (e.target.closest('.ytp-size-button') ||
+        (e.target.closest('button') && /theater/i.test(e.target.closest('button').getAttribute('aria-label') || ''))) {
       setTimeout(debouncedUpdate, 150);
     }
-    // Close settings popup if clicked outside
     const popup = document.getElementById('yt-curved-settings-popup');
     if (popup && popup.classList.contains('open')) {
       if (!e.target.closest('#yt-curved-settings-popup') &&
@@ -454,42 +466,34 @@
     }
   });
 
-  // Safety net
+  // Safety net — every 2s, verify state and re-attach if needed
   setInterval(() => {
-    if (!document.hidden) {
-      const theaterOn = checkTheaterMode();
-      const theaterClass = document.documentElement.classList.contains('yt-theater-curved');
-      const fsOn = checkFullscreenMode();
-      const fsClass = document.documentElement.classList.contains('yt-fullscreen-curved');
-      if (theaterOn !== theaterClass || fsOn !== fsClass) updateAllStates();
+    if (document.hidden) return;
+    if (!watchFlexyObserver) {
+      waitForWatchFlexyAndSetup(0);
+      return;
+    }
+    updateAllStates();
 
-      // Keep loop button in sync with actual video.loop
-      const video = document.querySelector('video.html5-main-video') || document.querySelector('video');
-      const btn = document.querySelector('[data-action="loop"]');
-      if (video && btn) {
-        if (video.loop !== isLooping) {
-          isLooping = video.loop;
-          btn.classList.toggle('active', isLooping);
-        }
-      }
+    const video = document.querySelector('video.html5-main-video') || document.querySelector('video');
+    const btn = document.querySelector('[data-action="loop"]');
+    if (video && btn && video.loop !== isLooping) {
+      isLooping = video.loop;
+      btn.classList.toggle('active', isLooping);
     }
   }, 2000);
 
   // ============================================================
-  // INIT
+  // START
   // ============================================================
   async function init() {
-    if (isInitialized) return;
     await loadSettings();
     applyRadius();
-    console.log('[YT Curved] Initializing with settings:', settings);
-    setupObservers();
+    console.log('[YT Curved] Init with settings:', settings);
+    waitForWatchFlexyAndSetup(0);
   }
 
-  if (document.readyState === 'complete') {
-    init();
-  } else {
-    window.addEventListener('load', init);
-  }
+  if (document.readyState === 'complete') init();
+  else window.addEventListener('load', init);
 
 })();
